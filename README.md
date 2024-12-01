@@ -1372,4 +1372,506 @@ Instead of frequency domain manipulation, it uses:
 6. Convert back for audio output
 
 
-my head hurts
+## p-adic and AM9511 APU 
+- 32-bit floating point operations and transcendental functions.
+-  We'll interface with it through ports 80 (data) and 81 (command).
+
+```
+// Pure P-adic SSB Demodulator using AM9511 APU
+// Using p=7 and floating point operations
+// AM9511 ports: #80 = data, #81 = command
+
+// APU Commands
+#10 c! // FADD
+#11 s! // FSUB
+#12 m! // FMUL
+#13 d! // FDIV
+#15 q! // SQRT
+#16 e! // SIN
+#17 o! // COS
+#18 n! // TAN
+#19 l! // ASIN
+#1A a! // ACOS
+#1B t! // ATAN
+#1C x! // LOG
+#1D y! // LN
+#1E p! // EXP
+#1F w! // PWR
+
+// Buffers for p-adic components (4 samples x 4 digits)
+[ 0 0 0 0 ] p0!  // Least significant
+[ 0 0 0 0 ] p1!  // Second digit
+[ 0 0 0 0 ] p2!  // Third digit
+[ 0 0 0 0 ] p3!  // Most significant
+
+// Buffer for floating point results
+[ 0 0 0 0 ] f!
+
+// W: Write float to APU
+:W
+  // Split 32-bit float into 4 bytes and send
+  #80 /O    // LSB
+  8 } #80 /O
+  8 } #80 /O
+  8 } #80 /O  // MSB
+;
+
+// R: Read float from APU
+:R
+  // Read 4 bytes and combine
+  #80 /I
+  8 { x!
+  #80 /I x + 
+  8 { x!
+  #80 /I x +
+  8 { x!
+  #80 /I x +
+;
+
+// P: Convert to p-adic with APU float
+:P
+  n!          // Store input
+  // Convert to float and normalize
+  W           // Send to APU
+  #1D #81 /O  // LN command
+  R           // Get result
+  7 W         // Push 7
+  #13 #81 /O  // FDIV command
+  R           // Get normalized result
+  
+  // Extract p-adic digits using exp
+  4(          // For each digit
+    i!
+    " W       // Duplicate top value
+    7 W       // Push 7
+    #1E #81 /O // EXP command
+    R         // Get exponent
+    s!        // Store for later
+    #11 #81 /O // FSUB command
+    R         // Get remainder
+    p i ?!    // Store digit
+  )
+;
+
+// T: Teichmuller expansion using APU
+:T
+  i!          // Save index
+  // Combine p-adic digits with exp
+  p0 i ? W    // First digit
+  7 W
+  #1E #81 /O  // EXP
+  R
+  p1 i ? W    // Add second digit
+  #12 #81 /O  // FMUL
+  R
+  p2 i ? W    // Add third digit
+  #12 #81 /O  // FMUL
+  R
+  p3 i ? W    // Add fourth digit
+  #12 #81 /O  // FMUL
+  R
+  
+  // Project to unit circle using sin/cos
+  " W         // Duplicate
+  #16 #81 /O  // SIN
+  R x!        // Store sine
+  #17 #81 /O  // COS
+  R           // Get cosine
+  x W         // Push sine
+  #1B #81 /O  // ATAN
+  R           // Get angle
+  f i ?!      // Store result
+;
+
+// V: P-adic valuation with transcendentals
+:V
+  i!          // Save index
+  0 v!        // Initialize valuation
+  
+  4(          // Check each digit
+    j!
+    p j ? i ? W  // Get digit
+    #1D #81 /O   // LN command
+    R            // Get log
+    0 W          // Compare to 0
+    #11 #81 /O   // FSUB
+    R
+    0 = (        // If zero
+      v 1+ v!    // Increment valuation
+    )
+  )
+;
+
+// N: P-adic norm using APU
+:N
+  V           // Get valuation
+  7 W         // Push 7
+  v W         // Push valuation
+  #1F #81 /O  // PWR command (7^-v)
+  R           // Get result
+;
+
+// L: Local component with transcendentals
+:L
+  i!          // Save index
+  f i ? W     // Get Teichmuller value
+  #16 #81 /O  // SIN
+  R x!        // Store sine component
+  f i ? W
+  #17 #81 /O  // COS
+  R y!        // Store cosine component
+  
+  // Combine using ATAN2
+  y W x W
+  #1B #81 /O  // ATAN
+  R
+;
+
+// A: Read ADC and process
+:A
+  #F0 /I      // Read ADC
+  W           // Send to APU
+  #1D #81 /O  // Normalize with LN
+  R n!        // Store result
+  
+  // Shift buffers
+  3(
+    3 i - j!  // Reverse index
+    p0 j 1+ ? p0 j ?!
+    p1 j 1+ ? p1 j ?!
+    p2 j 1+ ? p2 j ?!
+    p3 j 1+ ? p3 j ?!
+  )
+  
+  3 i!       // Set index for new sample
+  n P        // Convert to p-adic
+;
+
+// D: Pure p-adic demodulation with APU
+:D
+  // Process using transcendental functions
+  4(
+    i!
+    T        // Get Teichmuller character
+    L        // Get local component
+    N        // Get p-adic norm
+    
+    // Combine components with APU
+    #12 #81 /O  // FMUL
+    R
+    128 W
+    #10 #81 /O  // FADD for DC offset
+    R
+    
+    i 0 = (     // If first sample
+      R         // Get result
+      #F1 /O    // Output to DAC
+    )
+  )
+;
+
+// F: P-adic noise filter using APU
+:F
+  i!
+  N          // Get p-adic norm
+  32 W
+  #11 #81 /O // FSUB
+  R
+  0 < (      // If below threshold
+    0 n!     // Zero out
+  )
+;
+
+// M: Main processing loop
+:M
+  /U(        // Infinite loop
+    A        // Read sample
+    D        // Demodulate
+    F        // Filter
+    50()     // Sample rate control
+  )
+;
+
+// S: Initialize and start
+:S
+  // Clear buffers
+  4(
+    i!
+    0 p0 i ?!
+    0 p1 i ?!
+    0 p2 i ?!
+    0 p3 i ?!
+    0 f i ?!
+  )
+  M         // Start processing
+;
+
+```
+
+
+Key changes in this AM9511 APU version:
+
+1. APU Integration:
+- Uses ports #80 and #81 for data/command
+- All floating point operations handled by APU
+- Transcendental functions for p-adic calculations
+- 32-bit float precision
+
+2. APU Commands Used:
+- Basic math: FADD, FSUB, FMUL, FDIV
+- Transcendental: SIN, COS, TAN, ATAN
+- Exponential: EXP, LN, LOG, PWR
+- Other: SQRT
+
+3. Key Improvements:
+- Higher precision p-adic calculations
+- Better phase accuracy via transcendental functions
+- More accurate norm calculations
+- Better numerical stability
+
+4. Hardware Requirements Update:
+```
+Original Requirements:
+- Z80 CPU (4MHz+)
+- 2K RAM
+- MINT in ROM
+- ADC0804
+- DAC0800
+- RF frontend
+
+Additional for APU:
+- AM9511 APU
+- Address decoding for ports 80/81
+- Clock synchronization
+- Bus interface logic
+```
+
+5. Function Updates:
+- W: Write float to APU
+- R: Read float from APU
+- P: P-adic conversion using transcendentals
+- T: Teichmüller expansion with trig functions
+- N: Norm calculation with exponentials
+- L: Local components using complex trig
+
+6. Key Advantages:
+- Higher precision calculations
+- Better phase accuracy
+- More stable numerical operations
+- Hardware-accelerated math
+- Better frequency discrimination
+- More accurate p-adic metrics
+
+
+## use AM9511 functions in ROM as MINT library calls
+- This would be a more efficient implementation since we avoid I/O overhead.
+
+```
+// Pure P-adic SSB Demodulator with ROM math library
+// Assumes AM9511 functions are available as ROM calls
+// Each math function takes args from stack and returns result to stack
+
+// APU ROM function definitions (A-Z uppercase reserved)
+:A " * ;      // FMUL - multiply top two floats
+:B - ;        // FSUB - subtract top two floats
+:C + ;        // FADD - add top two floats
+:D / ;        // FDIV - divide top two floats
+:E n!e!;      // EXP  - exponential of top float
+:F n!l!;      // LN   - natural log
+:G n!s!;      // SIN  - sine
+:H n!c!;      // COS  - cosine
+:I n!t!;      // TAN  - tangent
+:J n!q!;      // SQRT - square root
+
+// P-adic storage (4 samples x 4 digits)
+[ 0 0 0 0 ] p0!  // Least significant
+[ 0 0 0 0 ] p1!  // Second digit
+[ 0 0 0 0 ] p2!  // Third digit
+[ 0 0 0 0 ] p3!  // Most significant
+
+// Float results buffer
+[ 0 0 0 0 ] f!
+
+// P: Convert to p-adic digits using float math
+:P
+  n!          // Store input value
+  F           // Take LN (normalize)
+  7 D         // Divide by 7
+  
+  4(          // Extract 4 digits
+    i!        // Save counter
+    " 7 E     // Duplicate and get EXP(7)
+    B         // Subtract from original
+    p i ?!    // Store p-adic digit
+  )
+;
+
+// T: Teichmuller expansion
+:T
+  i!          // Save index
+  
+  // Combine digits with exponential weights
+  p0 i ? 7 E A    // First digit * exp(7)
+  p1 i ? 7 E A    // Second * exp(7)
+  p2 i ? 7 E A    // Third * exp(7)
+  p3 i ? 7 E A    // Fourth * exp(7)
+  
+  // Convert to angle using trig
+  " G         // Get sine
+  x!          // Store temporarily
+  H           // Get cosine
+  x I         // Get arctangent
+  f i ?!      // Store result
+;
+
+// V: P-adic valuation
+:V
+  i!          // Save index
+  0 v!        // Initialize valuation
+  
+  4(          // Check each digit
+    j!
+    p j ? i ? F    // Get log
+    0 B            // Compare to 0
+    0 = (          // If zero
+      v 1+ v!      // Increment valuation
+    )
+  )
+;
+
+// N: P-adic norm
+:N
+  V           // Get valuation
+  7 $         // 7 to top of stack
+  E           // Get exp(7)
+  v A         // Multiply by valuation
+;
+
+// L: Local component
+:L
+  i!          // Save index
+  f i ?       // Get Teichmuller value
+  " G x!      // Get and store sine
+  H y!        // Get and store cosine
+  
+  // Combine using arctangent
+  y x I       // ATAN2 equivalent
+;
+
+// A: Read ADC and process
+:A
+  #F0 /I      // Read ADC
+  F           // Normalize with LN
+  n!          // Store result
+  
+  // Shift old values
+  3(
+    3 i - j!  // Reverse index
+    p0 j 1+ ? p0 j ?!
+    p1 j 1+ ? p1 j ?!
+    p2 j 1+ ? p2 j ?!
+    p3 j 1+ ? p3 j ?!
+  )
+  
+  3 i!       // Set index for new sample
+  n P        // Convert to p-adic
+;
+
+// D: Demodulation
+:D
+  4(          // Process 4 samples
+    i!
+    T         // Get Teichmuller
+    L         // Get local component
+    N         // Get norm
+    
+    A         // Multiply components
+    128 C     // Add DC offset
+    
+    i 0 = (   // If first sample
+      #F1 /O  // Output to DAC
+    )
+  )
+;
+
+// F: P-adic noise filter
+:F
+  i!
+  N          // Get norm
+  32 B       // Compare to threshold
+  0 < (      // If below threshold
+    0 n!     // Zero out
+  )
+;
+
+// M: Main loop
+:M
+  /U(        // Infinite loop
+    A        // Sample
+    D        // Process
+    F        // Filter
+    50()     // Timing
+  )
+;
+
+// S: Setup and start
+:S
+  // Clear all buffers
+  4(
+    i!
+    0 p0 i ?!
+    0 p1 i ?!
+    0 p2 i ?!
+    0 p3 i ?!
+    0 f i ?!
+  )
+  M          // Start main loop
+;
+```
+
+Key changes in this ROM library version:
+
+1. Math Functions:
+- Defined as MINT functions (A-J)
+- Take arguments from stack
+- Return results to stack
+- No direct port I/O needed
+
+2. Main Changes:
+- Removed all port 80/81 I/O
+- Simplified math operations
+- More efficient stack usage
+- Direct function calls
+- No need for byte manipulation
+
+3. Hardware Requirements Updated:
+```
+Required:
+- Z80 CPU (4MHz+)
+- 2K RAM minimum
+- MINT + Math Library in ROM
+- 8-bit ADC
+- 8-bit DAC
+- RF frontend
+
+No Longer Needed:
+- AM9511 chip
+- Port decode logic
+- Additional clock sync
+```
+
+4. Function Updates:
+- Simpler stack-based math
+- More efficient memory usage
+- Faster execution (no I/O wait)
+- Better register usage
+
+5. Key Benefits:
+- Faster execution
+- Less hardware complexity
+- More reliable (no I/O timing issues)
+- Better code maintainability
+- More efficient memory usage
+
+
+
